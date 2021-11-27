@@ -17,11 +17,10 @@ struct Opts {
     path: Option<PathBuf>,
 }
 
-fn get_commits(
-    repo: &Repository,
-    start: impl Display,
-    end: impl Display,
-) -> Result<Vec<git2::Oid>> {
+#[tracing::instrument(skip(start, end))]
+fn get_commits(repo_path: &Path, start: impl Display, end: impl Display) -> Result<Vec<git2::Oid>> {
+    tracing::debug!(%start, %end, "getting commits");
+    let repo = Repository::open(repo_path)?;
     let mut walk = repo.revwalk()?;
     let range = format!("{start}..{end}", start = start, end = end);
     walk.set_sorting(git2::Sort::REVERSE)?;
@@ -29,65 +28,25 @@ fn get_commits(
     Ok(walk.map(|oid| oid.unwrap()).collect::<Vec<_>>())
 }
 
-struct DropGuard {
-    worktree: git2::Worktree,
-    path: PathBuf,
-}
-
-impl Deref for DropGuard {
-    type Target = git2::Worktree;
-
-    fn deref(&self) -> &Self::Target {
-        &self.worktree
-    }
-}
-
-impl DropGuard {
-    fn path(&self) -> &Path {
-        self.path.as_path()
-    }
-
-    fn new(worktree: git2::Worktree, path: impl Into<PathBuf>) -> Self {
-        Self {
-            worktree,
-            path: path.into(),
-        }
-    }
-}
-
-impl Drop for DropGuard {
-    fn drop(&mut self) {
-        eprintln!("pruning worktree");
-        let _ = self.worktree.prune(None);
-
-        eprintln!("removing worktree dir: {:?}", self.worktree.path());
-        let _ = std::fs::remove_dir_all(self.worktree.path());
-
-        eprintln!("dropping temporary directory: {:?}", &self.path);
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
+#[tracing::instrument]
 fn main() -> Result<()> {
+    color_eyre::install().unwrap();
+    tracing_subscriber::fmt::init();
+
     let args = Opts::from_args();
-    let repo = match args.path {
-        Some(path) => Repository::open(path).wrap_err("opening git repository")?,
-        None => Repository::open(".").wrap_err("opening git repository")?,
-    };
+    tracing::trace!(?args, "parsed arguments");
+    let repo_path = args.path.unwrap_or_else(|| PathBuf::from("."));
+    let commits = get_commits(&repo_path, &args.start, &args.end).wrap_err("computing commits")?;
+    tracing::debug!(?commits, "got commits");
 
-    let commits = get_commits(&repo, &args.start, &args.end).wrap_err("computing commits")?;
-
-    let repo = Arc::new(Mutex::new(repo));
+    let tempdir = tempfile::tempdir()?;
+    let repo_path_str = repo_path.to_str().unwrap();
     commits.into_iter().for_each(|oid| {
-        let worktree_name = format!("worktree-{}-{}", oid, uuid::Uuid::new_v4());
-        let new_path = dbg!(std::env::temp_dir().join(&worktree_name));
-        {
-            let repo = repo.lock().unwrap();
-            let worktree = DropGuard::new(
-                repo.worktree(&worktree_name, &new_path, None).unwrap(),
-                new_path,
-            );
-        }
+        let clone_path = tempdir.path().join(oid.to_string());
+
+        let mut builder = git2::build::RepoBuilder::new();
+        let repo = builder.clone(&repo_path_str, clone_path.as_path()).unwrap();
+        eprintln!("cloned repo for commit {:?}", oid);
     });
     Ok(())
 }
