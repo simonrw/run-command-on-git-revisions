@@ -2,17 +2,21 @@ use eyre::{Result, WrapErr};
 use git2::Repository;
 use rayon::prelude::*;
 use std::fmt::Display;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::Command;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 struct Opts {
+    /// Start ref
     #[structopt(short, long)]
     start: String,
+    /// End ref
     #[structopt(short, long)]
     end: String,
+    /// Command to run on each commit
+    command: String,
+    /// Path to repository (defaults to current directory)
     #[structopt(short, long)]
     path: Option<PathBuf>,
 }
@@ -41,12 +45,26 @@ fn main() -> Result<()> {
 
     let tempdir = tempfile::tempdir()?;
     let repo_path_str = repo_path.to_str().unwrap();
-    commits.into_iter().for_each(|oid| {
+    commits.into_par_iter().for_each(|oid| {
+
         let clone_path = tempdir.path().join(oid.to_string());
 
         let mut builder = git2::build::RepoBuilder::new();
         let repo = builder.clone(&repo_path_str, clone_path.as_path()).unwrap();
-        eprintln!("cloned repo for commit {:?}", oid);
+        let working_dir = repo.path().join("..").canonicalize().unwrap();
+
+        let span = tracing::debug_span!("commit", sha = ?oid, path = ?working_dir, command = ?args.command);
+        let _enter = span.enter();
+        tracing::debug!("cloned repo");
+
+        tracing::info!("running user specified command");
+        let mut child = Command::new("bash")
+            .args(&["-c", &args.command]).spawn().expect("spawning user command");
+        let exit_status = child.wait().expect("waiting for child process");
+        if !exit_status.success() {
+            let code = exit_status.code().unwrap_or(1);
+            eprintln!("command failed with exit status {}", code);
+        }
     });
     Ok(())
 }
