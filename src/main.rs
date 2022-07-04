@@ -43,6 +43,15 @@ fn checkout(repo: &Repository, oid: git2::Oid) -> Result<()> {
     Ok(())
 }
 
+fn with_reset(repo: &Repository, f: impl FnOnce(&Repository) -> Result<()>) -> Result<()> {
+    // get current commit by name
+    let h = repo.head().unwrap();
+    let commit = h.peel_to_commit().wrap_err("non-commit target")?;
+    let res = f(repo);
+    checkout(repo, commit.id()).wrap_err_with(|| format!("checking out commit {:?}", commit))?;
+    res
+}
+
 #[tracing::instrument]
 fn main() -> Result<()> {
     color_eyre::install().unwrap();
@@ -53,39 +62,44 @@ fn main() -> Result<()> {
 
     // configure the thread pool
     let repo_path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let repo = Repository::discover(repo_path).wrap_err("finding repo")?;
+    let repo = Repository::discover(&repo_path).wrap_err("finding repo")?;
 
     let commits = get_commits(&repo, &args.start, &args.end).wrap_err("computing commits")?;
     tracing::debug!(?commits, "got commits");
 
-    for oid in commits {
-        tracing::trace!("checking out commit");
-        checkout(&repo, oid).unwrap();
-        let working_dir = repo.path().join("..").canonicalize().unwrap();
+    with_reset(&repo, |repo| {
+        for oid in commits {
+            tracing::trace!("checking out commit");
+            checkout(&repo, oid).unwrap();
 
-        let span = tracing::debug_span!("commit", sha = ?oid, path = ?working_dir, command = ?args.command);
-        let _enter = span.enter();
-        tracing::debug!("cloned repo");
+            let span = tracing::debug_span!("commit", sha = ?oid, command = ?args.command);
+            let _enter = span.enter();
 
-        tracing::info!("running user specified command");
-        let output = Command::new("bash")
-            .current_dir(&working_dir)
-            .args(&["-c", &args.command])
-            .output()
-            .expect("spawning user command");
-        let code = output.status.code().unwrap_or(1);
+            tracing::info!("running user specified command");
+            let output = Command::new("bash")
+                .current_dir(&repo_path)
+                .args(&["-c", &args.command])
+                .output()
+                .expect("spawning user command");
+            let code = output.status.code().unwrap_or(1);
 
-        if output.status.success() {
-            let stdout = String::from_utf8(output.stdout).unwrap();
-            tracing::trace!(%stdout, %code, "successful exit code");
-            println!("Commit {:?} successful", oid);
-        } else {
-            let stderr = String::from_utf8(output.stderr).unwrap();
-            tracing::trace!(%stderr, %code, "failed exit code");
-            eprintln!("Commit {:?} failed with exit code {}", oid, code);
-            eprintln!("{}", stderr);
+            if output.status.success() {
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                tracing::trace!(%stdout, %code, "successful exit code");
+                println!("Commit {:?} successful", oid);
+            } else {
+                let stderr = std::str::from_utf8(&output.stderr).unwrap();
+                tracing::trace!(%stderr, %code, "failed exit code");
+                eprintln!("Commit {:?} failed with exit code {}", oid, code);
+                let stderr = stderr.trim();
+                if !stderr.is_empty() {
+                    eprintln!("{}", stderr);
+                }
+            }
         }
-    }
+        Ok(())
+    })
+    .wrap_err("analysing repo")?;
 
     Ok(())
 }
