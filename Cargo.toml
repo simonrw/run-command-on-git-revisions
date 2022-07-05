@@ -9,9 +9,7 @@ edition = "2021"
 color-eyre = "0.5.11"
 eyre = "0.6.5"
 git2 = "0.13.24"
-rayon = "1.5.1"
 structopt = "0.3.25"
-tempfile = "3.2.0"
 tracing = "0.1.29"
 tracing-subscriber = { version = "0.3.2", features = ["env-filter"] }
 uuid = { version = "0.8.2", features = ["v4"] }
