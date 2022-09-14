@@ -11,7 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Iterator, List
+from typing import Generator, Iterator, List, Optional
 
 
 class TestRunner(ABC):
@@ -19,13 +19,18 @@ class TestRunner(ABC):
         self.root = root
 
     @abstractmethod
-    def run_tests(self, commits: List[str], command: str) -> TestResults:
+    def run_tests(
+        self, commits: List[str], command: str, show_output: bool
+    ) -> TestResults:
         pass
 
-    def run_test(self, commit: str, command: str) -> TestResult:
+    def run_test(self, commit: str, command: str, show_output: bool) -> TestResult:
         cmd = shlex.split(command)
         with self.create_worktree(commit) as worktree_path:
-            res = sp.run(cmd, cwd=worktree_path, stdout=sp.PIPE, stderr=sp.PIPE)
+            if show_output:
+                res = sp.run(cmd, cwd=worktree_path)
+            else:
+                res = sp.run(cmd, cwd=worktree_path, stdout=sp.PIPE, stderr=sp.PIPE)
             return TestResult.from_child(commit, res)
 
     @contextmanager
@@ -46,6 +51,31 @@ class TestRunner(ABC):
         sp.run(cmd, check=True, stdout=sp.PIPE, stderr=sp.PIPE)
 
 
+class SingleThreadedTestRunner(TestRunner):
+    def run_tests(
+        self, commits: List[str], command: str, show_output: bool
+    ) -> TestResults:
+        results = []
+        for commit in commits:
+            res = self.run_test(commit, command, show_output)
+            results.append(res)
+
+        return TestResults(results)
+
+
+class MultiThreadedTestRunner(TestRunner):
+    def run_tests(
+        self, commits: List[str], command: str, show_output: bool
+    ) -> TestResults:
+        futures = []
+        with ThreadPoolExecutor() as pool:
+            for commit in commits:
+                fut = pool.submit(self.run_test, commit, command, show_output)
+                futures.append(fut)
+
+        return TestResults.from_futures(as_completed(futures))
+
+
 class Repository:
     test_runner: TestRunner
 
@@ -56,9 +86,11 @@ class Repository:
         else:
             self.test_runner = MultiThreadedTestRunner(root)
 
-    def run_tests(self, start: str, end: str, command: str) -> TestResults:
+    def run_tests(
+        self, start: str, end: str, command: str, show_output: bool
+    ) -> TestResults:
         commits_in_range = self.get_commit_range(start, end)
-        return self.test_runner.run_tests(commits_in_range, command)
+        return self.test_runner.run_tests(commits_in_range, command, show_output)
 
     def get_commit_range(self, start: str, end: str) -> List[str]:
         cmd = ["git", "-C", str(self.root), "rev-list", f"{start}..{end}"]
@@ -66,31 +98,10 @@ class Repository:
         return [every.strip() for every in res.stdout.decode("utf-8").split()]
 
 
-class SingleThreadedTestRunner(TestRunner):
-    def run_tests(self, commits: List[str], command: str) -> TestResults:
-        results = []
-        for commit in commits:
-            res = self.run_test(commit, command)
-            results.append(res)
-
-        return TestResults(results)
-
-
-class MultiThreadedTestRunner(TestRunner):
-    def run_tests(self, commits: List[str], command: str) -> TestResults:
-        futures = []
-        with ThreadPoolExecutor() as pool:
-            for commit in commits:
-                fut = pool.submit(self.run_test, commit, command)
-                futures.append(fut)
-
-        return TestResults.from_futures(as_completed(futures))
-
-
 @dataclass
 class TestResult:
-    stdout: str
-    stderr: str
+    stdout: Optional[str]
+    stderr: Optional[str]
     return_code: int
     commit: str
 
@@ -101,8 +112,8 @@ class TestResult:
     def from_child(cls, commit: str, child: sp.CompletedProcess) -> TestResult:
         return cls(
             return_code=child.returncode,
-            stdout=child.stdout.decode("utf-8"),
-            stderr=child.stderr.decode("utf-8"),
+            stdout=child.stdout.decode("utf-8") if child.stdout is not None else None,
+            stderr=child.stderr.decode("utf-8") if child.stderr is not None else None,
             commit=commit,
         )
 
@@ -130,9 +141,12 @@ def main():
     parser.add_argument("-s", "--start", required=True)
     parser.add_argument("-e", "--end", required=False, default="HEAD")
     parser.add_argument("-p", "--path", required=False, type=Path, default=Path.cwd())
+    parser.add_argument("--show-output", action="store_true", default=False)
     parser.add_argument("--single-threaded", action="store_true", default=False)
     args = parser.parse_args()
 
     repo = Repository(args.path, args.single_threaded)
-    results = repo.run_tests(args.start, args.end, args.command)
+    results = repo.run_tests(
+        args.start, args.end, args.command, show_output=args.show_output
+    )
     results.present()
