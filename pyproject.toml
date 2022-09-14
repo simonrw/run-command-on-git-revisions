@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "run-command-on-git-revisions"
+version = "0.1.0"
+description = ""
+authors = ["Simon Walker <s.r.walker101@googlemail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.7"
+
+[tool.poetry.dev-dependencies]
+black = "^22.8.0"
+flake8 = "^5.0.4"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+run-command-on-git-revisions = "run_command_on_git_revisions:main"
