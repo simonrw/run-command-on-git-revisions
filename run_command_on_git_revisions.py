@@ -54,16 +54,40 @@ class TestRunner(ABC):
         sp.run(cmd, check=True, stdout=sp.PIPE, stderr=sp.PIPE)
 
 
+def null_track(c, **kwargs):
+    return c
+
+
 class SingleThreadedTestRunner(TestRunner):
     def run_tests(
         self, commits: List[str], command: str, show_output: bool
     ) -> TestResults:
         results = []
-        for commit in track(commits, description="Working..."):
+
+        if show_output:
+            progress_wrapper = null_track
+        else:
+            progress_wrapper = track
+
+        for commit in progress_wrapper(commits, description="Working..."):
             res = self.run_test(commit, command, show_output)
             results.append(res)
 
         return TestResults(results)
+
+
+class NullProgress:
+    def add_task(self, *args, **kwargs):
+        pass
+
+    def advance(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        pass
 
 
 class MultiThreadedTestRunner(TestRunner):
@@ -71,7 +95,13 @@ class MultiThreadedTestRunner(TestRunner):
         self, commits: List[str], command: str, show_output: bool
     ) -> TestResults:
         futures = []
-        with Progress() as progress:
+
+        if show_output:
+            progress_cls = NullProgress
+        else:
+            progress_cls = Progress
+
+        with progress_cls() as progress:
             task = progress.add_task("Working...", total=len(commits))
             with ThreadPoolExecutor() as pool:
                 for commit in commits:
