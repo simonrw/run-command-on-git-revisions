@@ -23,13 +23,22 @@ class TestRunner(ABC):
 
     @abstractmethod
     def run_tests(
-        self, commits: List[str], command: str, show_output: bool
+        self, commits: List[str], setup: Optional[str], command: str, show_output: bool
     ) -> TestResults:
         ...
 
-    def run_test(self, commit: str, command: str, show_output: bool) -> TestResult:
-        cmd = shlex.split(command)
+    def run_test(
+        self, commit: str, setup: Optional[str], command: str, show_output: bool
+    ) -> TestResult:
         with self.create_worktree(commit) as worktree_path:
+            # run setup
+            if setup is not None:
+                setup_cmd = shlex.split(setup)
+                # TODO: handle errors
+                sp.run(setup_cmd, cwd=worktree_path, stdout=sp.PIPE, stderr=sp.PIPE)
+
+            # run test
+            cmd = shlex.split(command)
             if show_output:
                 res = sp.run(cmd, cwd=worktree_path)
             else:
@@ -60,7 +69,7 @@ def null_track(c, **kwargs):
 
 class SingleThreadedTestRunner(TestRunner):
     def run_tests(
-        self, commits: List[str], command: str, show_output: bool
+        self, commits: List[str], setup: Optional[str], command: str, show_output: bool
     ) -> TestResults:
         results = []
 
@@ -70,7 +79,7 @@ class SingleThreadedTestRunner(TestRunner):
             progress_wrapper = track
 
         for commit in progress_wrapper(commits, description="Working..."):
-            res = self.run_test(commit, command, show_output)
+            res = self.run_test(commit, setup, command, show_output)
             results.append(res)
 
         return TestResults(results)
@@ -92,7 +101,7 @@ class NullProgress:
 
 class MultiThreadedTestRunner(TestRunner):
     def run_tests(
-        self, commits: List[str], command: str, show_output: bool
+        self, commits: List[str], setup: Optional[str], command: str, show_output: bool
     ) -> TestResults:
         futures = []
 
@@ -105,7 +114,9 @@ class MultiThreadedTestRunner(TestRunner):
             task = progress.add_task("Working...", total=len(commits))
             with ThreadPoolExecutor() as pool:
                 for commit in commits:
-                    fut = pool.submit(self.run_test, commit, command, show_output)
+                    fut = pool.submit(
+                        self.run_test, commit, setup, command, show_output
+                    )
                     futures.append(fut)
 
                 results = []
@@ -127,13 +138,18 @@ class Repository:
             self.test_runner = MultiThreadedTestRunner(root)
 
     def run_tests(
-        self, start: str, end: str, command: str, show_output: bool
+        self,
+        begin: str,
+        end: str,
+        setup: Optional[str],
+        command: str,
+        show_output: bool,
     ) -> TestResults:
-        commits_in_range = self.get_commit_range(start, end)
-        return self.test_runner.run_tests(commits_in_range, command, show_output)
+        commits_in_range = self.get_commit_range(begin, end)
+        return self.test_runner.run_tests(commits_in_range, setup, command, show_output)
 
-    def get_commit_range(self, start: str, end: str) -> List[str]:
-        cmd = ["git", "-C", str(self.root), "rev-list", f"{start}..{end}"]
+    def get_commit_range(self, begin: str, end: str) -> List[str]:
+        cmd = ["git", "-C", str(self.root), "rev-list", f"{begin}..{end}"]
         res = sp.run(cmd, check=True, stdout=sp.PIPE)
         return [every.strip() for every in res.stdout.decode("utf-8").split()]
 
@@ -187,9 +203,10 @@ class TestResults:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command")
-    parser.add_argument("-s", "--start", required=True)
+    parser.add_argument("-b", "--begin", required=True)
     parser.add_argument("-e", "--end", required=False, default="HEAD")
     parser.add_argument("-p", "--path", required=False, type=Path, default=Path.cwd())
+    parser.add_argument("-s", "--setup", required=False)
     parser.add_argument("--show-output", action="store_true", default=False)
     parser.add_argument("--single-threaded", action="store_true", default=False)
     args = parser.parse_args()
@@ -197,7 +214,7 @@ def main():
     console = Console()
     repo = Repository(args.path, args.single_threaded)
     results = repo.run_tests(
-        args.start, args.end, args.command, show_output=args.show_output
+        args.begin, args.end, args.setup, args.command, show_output=args.show_output
     )
     results.present(console)
     if results.failed():
