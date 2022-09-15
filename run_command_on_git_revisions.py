@@ -7,11 +7,14 @@ import argparse
 import tempfile
 from contextlib import contextmanager
 import subprocess as sp
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Iterator, List, Optional
+from typing import Generator, List, Optional
+
+from rich.console import Console
+from rich.progress import track, Progress
 
 
 class TestRunner(ABC):
@@ -22,7 +25,7 @@ class TestRunner(ABC):
     def run_tests(
         self, commits: List[str], command: str, show_output: bool
     ) -> TestResults:
-        pass
+        ...
 
     def run_test(self, commit: str, command: str, show_output: bool) -> TestResult:
         cmd = shlex.split(command)
@@ -56,7 +59,7 @@ class SingleThreadedTestRunner(TestRunner):
         self, commits: List[str], command: str, show_output: bool
     ) -> TestResults:
         results = []
-        for commit in commits:
+        for commit in track(commits, description="Working..."):
             res = self.run_test(commit, command, show_output)
             results.append(res)
 
@@ -68,12 +71,19 @@ class MultiThreadedTestRunner(TestRunner):
         self, commits: List[str], command: str, show_output: bool
     ) -> TestResults:
         futures = []
-        with ThreadPoolExecutor() as pool:
-            for commit in commits:
-                fut = pool.submit(self.run_test, commit, command, show_output)
-                futures.append(fut)
+        with Progress() as progress:
+            task = progress.add_task("Working...", total=len(commits))
+            with ThreadPoolExecutor() as pool:
+                for commit in commits:
+                    fut = pool.submit(self.run_test, commit, command, show_output)
+                    futures.append(fut)
 
-        return TestResults.from_futures(as_completed(futures))
+                results = []
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+                    progress.advance(task)
+
+        return TestResults(results)
 
 
 class Repository:
@@ -122,17 +132,23 @@ class TestResults:
     def __init__(self, test_results: List[TestResult]) -> None:
         self.test_results = test_results
 
-    @classmethod
-    def from_futures(cls, futures: Iterator[Future[TestResult]]) -> TestResults:
-        results = []
-        for fut in futures:
-            results.append(fut.result())
-
-        return cls(results)
-
-    def present(self):
+    def present(self, console: Console):
         for result in self.test_results:
-            print(result)
+            if result.success():
+                console.print(f"Commit {result.commit} ok")
+            else:
+                console.print(f"Commit {result.commit} failed")
+                if result.stdout is not None:
+                    console.print("--- stdout:")
+                    for line in result.stdout.split():
+                        line = line.strip()
+                        console.print(f"--- {line}")
+
+                if result.stderr is not None:
+                    console.print("--- stderr:")
+                    for line in result.stderr.split():
+                        line = line.strip()
+                        console.print(f"--- {line}")
 
 
 def main():
@@ -145,8 +161,9 @@ def main():
     parser.add_argument("--single-threaded", action="store_true", default=False)
     args = parser.parse_args()
 
+    console = Console()
     repo = Repository(args.path, args.single_threaded)
     results = repo.run_tests(
         args.start, args.end, args.command, show_output=args.show_output
     )
-    results.present()
+    results.present(console)
