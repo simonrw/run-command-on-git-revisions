@@ -162,6 +162,9 @@ class TestResults:
     def __init__(self, test_results: List[TestResult]) -> None:
         self.test_results = test_results
 
+    def failed(self) -> bool:
+        return any(not result.success() for result in self.test_results)
+
     def present(self, console: Console):
         for result in self.test_results:
             if result.success():
@@ -197,3 +200,5 @@ def main():
         args.start, args.end, args.command, show_output=args.show_output
     )
     results.present(console)
+    if results.failed():
+        raise SystemExit(1)
